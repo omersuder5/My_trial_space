@@ -1,5 +1,5 @@
 from abc import ABCMeta, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -122,3 +122,35 @@ def multi_cumsum(M: torch.Tensor, axis: int = -1) -> torch.Tensor:
     M = torch.nn.functional.pad(M, pads)
 
     return M
+
+
+# Kernel call facilitators
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def get_discretized_signature_kernel(**kwargs):
+    static_kernel_type = kwargs['static_kernel_type']
+    kernel_sigma = kwargs['kernel_sigma']
+    n_levels = kwargs['n_levels']
+
+    if static_kernel_type == 'linear':
+        static_kernel = LinearKernel()
+    elif static_kernel_type == 'rbf':
+        static_kernel = RBFKernel(sigma=kernel_sigma)
+    elif static_kernel_type == 'rq':
+        static_kernel = RationalQuadraticKernel(sigma=kernel_sigma)
+    kernel = SignatureKernel(n_levels=n_levels, static_kernel=static_kernel)
+
+    return kernel
+
+    
+def gram(kernel: Any, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    """
+    Returns Gram matrix K(X,Y) for either:
+      - callable kernel: kernel(X,Y)
+      - object with compute_Gram: kernel.compute_Gram(X,Y)
+    """
+    if hasattr(kernel, "compute_Gram"):
+        return kernel.compute_Gram(X, Y)
+    if hasattr(kernel, "compute_gram"):
+        return kernel.compute_gram(X, Y)
+    return kernel(X, Y)
