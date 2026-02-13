@@ -21,7 +21,7 @@ def mmd_loss(X: torch.Tensor, Y: torch.Tensor, kernel: Any) -> torch.Tensor:
     return sum_xx_off / (n * (n - 1)) + sum_yy_off / (m * (m - 1)) - 2.0 * Kxy.mean()
 
 
-def compute_mmd_loss(kernel, X, output, lead_lag, lags):
+def compute_mmd_loss(kernel, X, output, lead_lag = False, lags = None):
     if lead_lag:
         X = batch_lead_lag_transform(X[:,:,1:], X[:,:,0:1], lags) # inputs are (price series, time dimension, lags to use)
         output = batch_lead_lag_transform(output[:,:,1:], output[:,:,0:1], lags)
