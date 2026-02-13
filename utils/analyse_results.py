@@ -84,6 +84,7 @@ def inspect_run_and_mmd(
     kwargs: dict,
     *,
     n_examples: int = 5,
+    kernel_mmd: object,
     T_plot: int | None = None,
     T_mmd: int = 200,
     N_mmd: int = 50,
@@ -94,8 +95,15 @@ def inspect_run_and_mmd(
     if target_generator is None:
         raise ValueError("kwargs must contain target_generator for this inspector.")
 
-    kernel = kwargs["kernel"]
-    kernel_mode = kwargs["kernel_mode"]
+    if kernel_mmd is None:
+        kernel = kwargs["kernel"]
+        kernel_mode = kwargs["kernel_mode"]
+    else:
+        kernel = kernel_mmd
+        if "sig" in kernel.__class__.__name__.lower() or "volt" in kernel.__class__.__name__.lower():
+            kernel_mode = "sequential"
+        else:
+            kernel_mode = "static"
     lead_lag = bool(kwargs.get("lead_lag", False))
     lags = int(kwargs.get("lags", 1))
     dtype = kwargs.get("dtype", torch.float64)
