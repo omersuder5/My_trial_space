@@ -92,6 +92,7 @@ class ESNGenerator(nn.Module):
         self.W = nn.Parameter(W0)
 
         self.activation = _get_activation(activation)
+        self.activation_name = activation if isinstance(activation, str) else getattr(activation, "__name__", "custom")
         self.xi_scale = float(xi_scale)
         self.eta_scale = float(eta_scale)
 

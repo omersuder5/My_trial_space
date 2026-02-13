@@ -230,22 +230,46 @@ def train_ESN_MMD(
                     last_improve_epoch = epoch
                     tqdm.write(f"LR drop {lr_drops_used}/{max_lr_drops}: lr -> {new_lr:.3g}")
 
-        # early stop
-        if best_epoch >= 0 and (epoch - best_epoch) >= early_stopping_patience:
-            tqdm.write(
-                f"Early stopping at epoch {epoch} "
-                f"(best avg_{num_losses} {best_avg_loss:.6g} at epoch {best_epoch}, lr_drops_used={lr_drops_used})"
-            )
-            break
+        early_stopping_bool = best_epoch >= 0 and (epoch - best_epoch) >= early_stopping_patience
 
         # checkpoint
-        if ((epoch + 1) % save_every) == 0:
+        if ((epoch + 1) % save_every) == 0 or early_stopping_patience == 0 or early_stopping_bool:
+
+            kernel_spec = {
+                "kernel_mode": kernel_mode,
+                "kernel_name": kernel.__class__.__name__,
+                "kernel_params": {},
+                "kernel_str": None,
+            }
+
+            # common case: RBF-like
+            if hasattr(kernel, "sigma"):
+                kernel_spec["kernel_params"]["sigma"] = float(kernel.sigma)
+
+            # sigkernel SigKernel case
+            if hasattr(kernel, "dyadic_order"):
+                kernel_spec["kernel_params"]["dyadic_order"] = int(kernel.dyadic_order)
+            if hasattr(kernel, "static_kernel"):
+                sk = kernel.static_kernel
+                kernel_spec["kernel_params"]["static_kernel_name"] = sk.__class__.__name__
+                if hasattr(sk, "sigma"):
+                    kernel_spec["kernel_params"]["static_sigma"] = float(sk.sigma)
+            if hasattr(kernel, "n_levels"):
+                    kernel_spec["kernel_params"]["n_levels"] = int(kernel.n_levels)
+
+            kernel_spec["kernel_str"] = (
+                f'{kernel_spec["kernel_name"]}(' +
+                ", ".join(f"{k}={v}" for k, v in kernel_spec["kernel_params"].items()) +
+                ")"
+            )
+
             ckpt = {
                 "epoch": epoch,
                 "esn_state_dict": esn.state_dict(),
                 "optimizer_state_dict": opt.state_dict(),
                 "torch_rng_state": torch.get_rng_state(),
                 "losses": losses,
+                "avg_losses": avg_losses,
                 "best_avg_loss": best_avg_loss,
                 "best_epoch": best_epoch,
                 "last_k_losses": list(last_k),
@@ -253,6 +277,7 @@ def train_ESN_MMD(
                 "last_improve_epoch": last_improve_epoch,
                 "config": {
                     "kernel_mode": kernel_mode,
+                    "kernel_spec": kernel_spec,
                     "T": T,
                     "epochs": epochs,
                     "batch_size": batch_size,
@@ -272,11 +297,32 @@ def train_ESN_MMD(
                     "max_lr_drops": max_lr_drops,
                     "early_stopping_patience": early_stopping_patience,
                     "min_lr": min_lr,
+                    "run_id": run_id,
                 },
             }
+            esn_spec = {
+                "A": esn.A.detach().cpu(),
+                "C": esn.C.detach().cpu(),
+                "out_dim": int(esn.d),
+                "activation": getattr(esn, "activation_name", "tanh"),
+                "xi_scale": float(esn.xi_scale),
+                "eta_scale": float(esn.eta_scale),
+                "t_tilt": (None if esn.t_tilt is None else esn.t_tilt.detach().cpu()),
+                "target_rho": float(kwargs.get("target_rho", 0.9)),  # optional, informative only
+            }
+            ckpt["esn_spec"] = esn_spec
             torch.save(ckpt, run_path / "checkpoint.pt")
             np.save(run_path / "losses.npy", np.asarray(losses, dtype=np.float64))
             np.save(run_path / "avg_losses.npy", np.asarray(avg_losses, dtype=np.float64))
+
+        # early stop
+        if best_epoch >= 0 and (epoch - best_epoch) >= early_stopping_patience:
+            tqdm.write(
+                f"Early stopping at epoch {epoch} "
+                f"(best avg_{num_losses} {best_avg_loss:.6g} at epoch {best_epoch}, lr_drops_used={lr_drops_used})"
+            )
+            break
+
     torch.save(esn.state_dict(), run_path / "final_model.pt")
     np.save(run_path / "losses.npy", np.asarray(losses, dtype=np.float64))
     np.save(run_path / "avg_losses.npy", np.asarray(avg_losses, dtype=np.float64))
