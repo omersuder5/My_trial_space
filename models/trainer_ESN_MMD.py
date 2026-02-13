@@ -284,6 +284,9 @@ def train_ESN_MMD(
                     "d": d_expected,
                     "dtype": str(dtype),
                     "device": str(device),
+                    "generator_type": (
+                        "dataloader" if dataloader is not None else "target_generator"
+                    ),
                     # kwargs snapshot
                     "lr": lr,
                     "lead_lag": lead_lag,
