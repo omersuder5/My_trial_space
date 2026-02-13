@@ -86,14 +86,18 @@ def inspect_run_and_mmd(
     n_examples: int = 5,
     kernel_mmd: object,
     T_plot: int | None = None,
-    T_mmd: int = 200,
-    N_mmd: int = 50,
+    _T_mmd: int = None,
+    _N_mmd: int = None,
     noise: object | None = None,   # optional, only used if your generator needs it
 ):
     esn = kwargs["esn"]
     target_generator = kwargs.get("target_generator", None)
-    if target_generator is None:
-        raise ValueError("kwargs must contain target_generator for this inspector.")
+    dataloader = kwargs.get("dataloader", None)
+    T_mmd = int(kwargs.get("T")) if _T_mmd is None else int(_T_mmd)
+    N_mmd = int(kwargs.get("batch_size")) if _N_mmd is None else int(_N_mmd)
+
+    if target_generator is None and dataloader is None:
+        raise ValueError("kwargs must contain either target_generator or dataloader for this inspector.")
 
     if kernel_mmd is None:
         kernel = kwargs["kernel"]
@@ -121,6 +125,9 @@ def inspect_run_and_mmd(
                 X_tgt = target_generator.generate(N=n_examples)
             else:
                 X_tgt = target_generator.generate(N=n_examples, noise=noise)
+        elif dataloader is not None:
+            batch = next(iter(dataloader))
+            X_tgt = batch[0][:n_examples]
         else:
             X_tgt = target_generator(T=T0, N=n_examples)
 
@@ -149,6 +156,9 @@ def inspect_run_and_mmd(
                 X = target_generator.generate(N=N_mmd)
             else:
                 X = target_generator.generate(N=N_mmd, noise=noise)
+        elif dataloader is not None:
+            batch = next(iter(dataloader))
+            X = batch[0][:N_mmd]
         else:
             X = target_generator(T=T_mmd, N=N_mmd)
 
@@ -156,8 +166,8 @@ def inspect_run_and_mmd(
         Z = esn(T=T_mmd, N=N_mmd).to(device=device, dtype=dtype)
 
         if kernel_mode == "static":
-            Xk = X.reshape(N_mmd, -1)
-            Zk = Z.reshape(N_mmd, -1)
+            Xk = X.reshape(X.shape[0], -1)
+            Zk = Z.reshape(Z.shape[0], -1)
         else:
             Xk, Zk = X, Z
 
