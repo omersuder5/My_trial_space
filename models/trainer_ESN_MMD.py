@@ -123,15 +123,15 @@ def train_ESN_MMD(
     if save_every <= 0 or num_losses <= 0:
         raise ValueError("save_every and num_losses must be > 0")
 
+    if device is None:
+        device = esn.W.device
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     device_tag = str(device).replace(":", "")  # e.g. "cuda0" or "cpu"
 
     run_id = f"{run_name}_{timestamp}_{device_tag}"
     run_path = Path(out_dir) / run_id
     run_path.mkdir(parents=True, exist_ok=True)
-
-    if device is None:
-        device = esn.W.device
 
     esn = esn.to(device=device, dtype=dtype)
     esn.train(True)
