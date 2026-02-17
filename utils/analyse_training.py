@@ -175,5 +175,7 @@ def inspect_run_and_mmd(
 
     mmd_value = float(mmd.detach().cpu())
     print("MMD:", mmd_value)
-
-    return {"run_path": results["run_path"], "mmd": mmd_value}
+    if results is not None:
+        return {"run_path": results["run_path"], "mmd": mmd_value}
+    else:
+        return {"mmd": mmd_value}
