@@ -154,3 +154,127 @@ def gram(kernel: Any, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
     if hasattr(kernel, "compute_gram"):
         return kernel.compute_gram(X, Y)
     return kernel(X, Y)
+
+
+# Voltera Kernel implemented in torch for gradient descent -------------------------------------------------------------------------------------------------------
+Tensor = torch.Tensor
+class VolterraKernel:
+    """
+    Volterra DP kernel, parameters fitted once from a reference dataset.
+
+    After calling fit(X_ref), the kernel is fixed:
+      M := max_{samples,time} ||x_t||_2
+      tau := tau_coef / M
+      ld  := ld_coef * sqrt(max(0, 1 - (tau*M)^2))
+      Gram0 := 1 / (1 - ld^2)
+
+    Kernel between two paths x,y (length T):
+      k(x,y) := G[T-1, T-1]
+      G[i,j] = 1 + ld^2 * prev / (1 - tau^2 <x_i, y_j>)
+      prev = Gram0 if i==0 or j==0 else G[i-1,j-1]
+    """
+
+    def __init__(self, *, tau_coef: float = 0.1, ld_coef: float = 0.9, eps: float = 1e-12):
+        self.tau_coef = float(tau_coef)
+        self.ld_coef = float(ld_coef)
+        self.eps = float(eps)
+
+        self._fitted = False
+        self.M: Optional[float] = None
+        self.tau: Optional[float] = None
+        self.ld: Optional[float] = None
+        self.Gram0: Optional[float] = None
+
+    def fit(self, X_ref: Tensor) -> "VolterraKernel":
+        """
+        Fit (tau, ld, Gram0) from reference paths X_ref of shape (N,T,d).
+        """
+        if X_ref.ndim != 3:
+            raise ValueError("X_ref must have shape (N,T,d)")
+        # M = max ||x_t||
+        norms = torch.linalg.norm(X_ref, dim=-1)  # (N,T)
+        M = float(norms.max().clamp_min(self.eps).item())
+
+        tau = float(self.tau_coef / M)
+        # ensure ld is real
+        ld = float(self.ld_coef * (max(0.0, 1.0 - (tau * M) ** 2) ** 0.5))
+        Gram0 = float(1.0 / max(self.eps, 1.0 - ld * ld))
+
+        self.M = M
+        self.tau = tau
+        self.ld = ld
+        self.Gram0 = Gram0
+        self._fitted = True
+        return self # add this if you want to allow chaining like kernel.fit(X_ref).compute_Gram(X,Y)
+
+    def __call__(self, X: Tensor, Y: Tensor) -> Tensor:
+        return self.compute_Gram(X, Y)
+
+    def compute_Gram(self, X: Tensor, Y: Tensor) -> Tensor:
+        if not self._fitted:
+            raise RuntimeError("VolterraKernel must be fitted first: call kernel.fit(X_ref).")
+
+        if X.ndim != 3 or Y.ndim != 3:
+            raise ValueError("X and Y must have shape (n,T,d) and (m,T,d)")
+        n, T, d = X.shape
+        m, T2, d2 = Y.shape
+        if T != T2:
+            raise ValueError(f"T mismatch: {T} vs {T2}")
+        if d != d2:
+            raise ValueError(f"d mismatch: {d} vs {d2}")
+
+        device, dtype = X.device, X.dtype
+
+        tau2 = torch.tensor(self.tau * self.tau, device=device, dtype=dtype)
+        ld2 = torch.tensor(self.ld * self.ld, device=device, dtype=dtype)
+        Gram0 = torch.tensor(self.Gram0, device=device, dtype=dtype)
+        eps = torch.tensor(self.eps, device=device, dtype=dtype)
+
+        K = torch.empty((n, m), device=device, dtype=dtype)
+
+        # vectorized over Y-batch (m) per fixed X[a]
+        for a in range(n):
+            G_prev = torch.empty((m, T), device=device, dtype=dtype)
+
+            for i in range(T):
+                xi = X[a, i, :]  # (d,)
+                dots = torch.einsum("mtd,d->mt", Y, xi)  # (m,T)
+                denom = torch.clamp(1.0 - tau2 * dots, min=eps)
+
+                if i == 0:
+                    prev_diag = Gram0.expand(m, T)
+                else:
+                    prev_diag = torch.cat([Gram0.expand(m, 1), G_prev[:, :-1]], dim=1)
+
+                G_prev = 1.0 + ld2 * prev_diag / denom
+
+            # terminal value per Y[b]
+            K[a, :] = G_prev[:, -1]
+
+        return K
+
+    def spec(self) -> dict:
+        """
+        Safe-to-save kernel spec (no objects).
+        """
+        if not self._fitted:
+            return {
+                "kernel_mode": "sequential",
+                "kernel_name": "VolterraKernel",
+                "kernel_params": {"tau_coef": self.tau_coef, "ld_coef": self.ld_coef, "eps": self.eps},
+                "kernel_str": f"VolterraKernel(unfitted, tau_coef={self.tau_coef}, ld_coef={self.ld_coef})",
+            }
+        return {
+            "kernel_mode": "sequential",
+            "kernel_name": "VolterraKernel",
+            "kernel_params": {
+                "tau_coef": self.tau_coef,
+                "ld_coef": self.ld_coef,
+                "eps": self.eps,
+                "M": self.M,
+                "tau": self.tau,
+                "ld": self.ld,
+                "Gram0": self.Gram0,
+            },
+            "kernel_str": f"VolterraKernel(tau={self.tau:.3g}, ld={self.ld:.3g}, M={self.M:.3g})",
+        }

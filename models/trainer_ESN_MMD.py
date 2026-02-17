@@ -246,6 +246,10 @@ def train_ESN_MMD(
             if hasattr(kernel, "sigma"):
                 kernel_spec["kernel_params"]["sigma"] = float(kernel.sigma)
 
+            # volterra case
+            if hasattr(kernel, "spec"):
+                kernel_spec = kernel.spec()
+
             # sigkernel SigKernel case
             if hasattr(kernel, "dyadic_order"):
                 kernel_spec["kernel_params"]["dyadic_order"] = int(kernel.dyadic_order)
