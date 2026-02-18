@@ -154,7 +154,13 @@ def build_runs_df(
     cols = [c for c in preferred_cols if c in df.columns] + [c for c in df.columns if c not in preferred_cols]
     df = df[cols]
 
-    return df
+    losses = {
+        "losses": losses,
+        "avg_losses": avg_losses,
+    }
+
+
+    return df, losses
 
 
 # Get generator ------------------------------------------------------------------
