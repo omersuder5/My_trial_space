@@ -291,6 +291,9 @@ def train_ESN_MMD(
                     "generator_type": (
                         "dataloader" if dataloader is not None else "target_generator"
                     ),
+                    "generator_class": (
+                        dataloader.dataset.__class__.__name__ if dataloader is not None else target_generator.__class__.__name__
+                    ),
                     # kwargs snapshot
                     "lr": lr,
                     "lead_lag": lead_lag,
