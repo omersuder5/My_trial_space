@@ -89,6 +89,7 @@ def inspect_run_and_mmd(
     _T_mmd: int = None,
     _N_mmd: int = None,
     noise: object | None = None,   # optional, only used if your generator needs it
+    use_best: bool = False,        # whether to load best model weights for inspection
 ):
     esn = kwargs["esn"]
     target_generator = kwargs.get("target_generator", None)
@@ -115,6 +116,27 @@ def inspect_run_and_mmd(
 
     T0 = int(kwargs["T"] if T_plot is None else T_plot)
 
+    # ---------------- NEW: load best model weights if requested ----------------
+    if use_best:
+        if results is None or "run_path" not in results:
+            raise ValueError("use_best=True requires results['run_path']")
+
+        run_path = Path(results["run_path"])
+        best_path = run_path / "best_model.pt"
+        ckpt_path = run_path / "checkpoint.pt"
+
+        if best_path.exists():
+            state = torch.load(best_path, map_location="cpu")
+            esn.load_state_dict(state)
+        elif ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+            if "esn_state_dict" not in ckpt:
+                raise ValueError("checkpoint.pt does not contain 'esn_state_dict'")
+            esn.load_state_dict(ckpt["esn_state_dict"])
+        else:
+            raise FileNotFoundError(f"Neither {best_path} nor {ckpt_path} exists.")
+
+    # move ESN after (potential) load
     esn = esn.to(device=device, dtype=dtype)
     esn.eval()
 
