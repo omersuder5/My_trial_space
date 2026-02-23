@@ -40,6 +40,12 @@ class Noise:
 
         raise ValueError(f"unknown noise kind: {self.kind}")
 
+    def spec(self) -> dict:
+        return {
+            "name": "Noise",
+            "kind": str(self.kind),
+            "params": {} if self.params is None else {k: float(v) for k, v in self.params.items()},
+        }
 
 # -------------------------
 # base
@@ -57,17 +63,28 @@ class Proc(nn.Module):
     def dtype(self): return self._dummy.dtype
 
     @torch.no_grad()
-    def generate(self, N: int = 1, noise: Optional[Noise] = None, eps: Optional[Tensor] = None) -> Tensor:
-        # returns (N,T,d)
+    def generate(
+        self,
+        N: int = 1,
+        *,
+        T: Optional[int] = None,
+        noise: Optional[Noise] = None,
+        eps: Optional[Tensor] = None
+    ) -> Tensor:
+        """
+        Returns (N, T, d). If T is None, uses self.T.
+        If eps is provided, T is inferred from eps.shape[1].
+        """
         if eps is None:
+            T_eff = self.T if T is None else int(T)
             noise = noise or Noise("normal")
-            eps = noise.sample((N, self.T, self.d), device=self.device, dtype=self.dtype)
+            eps = noise.sample((N, T_eff, self.d), device=self.device, dtype=self.dtype)
         else:
-            eps = eps.to(self.device, self.dtype)
-        return self._gen(N, eps)
+            eps = eps.to(device=self.device, dtype=self.dtype)
+            if eps.ndim != 3 or eps.shape[0] != N or eps.shape[2] != self.d:
+                raise ValueError(f"eps must have shape (N,T,d)=({N},T,{self.d}), got {tuple(eps.shape)}")
 
-    def _gen(self, N: int, eps: Tensor) -> Tensor:
-        raise NotImplementedError
+        return self._gen(N, eps)
 
 
 # -------------------------
@@ -95,7 +112,8 @@ class ARMA(Proc):
             self.register_buffer("theta", torch.empty(0, dtype=self.dtype))
 
     def _gen(self, N: int, eps: Tensor) -> Tensor:
-        T, d = self.T, self.d
+        T = eps.shape[1]
+        d = self.d
         x = torch.zeros((N, T, d), device=self.device, dtype=self.dtype)
 
         for t in range(T):
@@ -115,6 +133,18 @@ class ARMA(Proc):
 
         return x
 
+    def spec(self) -> dict:
+        return {
+            "name": "ARMA",
+            "T": int(self.T),
+            "p": int(self.p),
+            "q": int(self.q),
+            "phi": None if self.phi is None else [float(x) for x in self.phi],
+            "theta": None if self.theta is None else [float(x) for x in self.theta],
+            "burnin": int(getattr(self, "burnin", 0)),
+            "mean": float(getattr(self, "mean", 0.0)),
+        }
+
 
 # -------------------------
 # GARCH(1,1) only, simplest useful one
@@ -131,7 +161,8 @@ class GARCH11(Proc):
         self.sigma2_0 = float(sigma2_0)
 
     def _gen(self, N: int, z: Tensor) -> Tensor:
-        T, d = self.T, self.d
+        T = z.shape[1]
+        d = self.d
         x = torch.zeros((N, T, d), device=self.device, dtype=self.dtype)
 
         sigma2 = torch.full((N, d), self.sigma2_0, device=self.device, dtype=self.dtype)
@@ -146,3 +177,28 @@ class GARCH11(Proc):
 
         return x
     
+    def get_sigma2(self, N: int, z: Tensor) -> Tensor:
+        T = z.shape[1]
+        d = self.d
+        sigma2 = torch.full((N, d), self.sigma2_0, device=self.device, dtype=self.dtype)
+        eps_prev = torch.zeros((N, d), device=self.device, dtype=self.dtype)
+        sigma2_list = [sigma2]
+
+        for t in range(T):
+            sigma2 = self.omega + self.alpha * (eps_prev ** 2) + self.beta * sigma2
+            sigma2 = torch.clamp(sigma2, min=1e-12)
+            eps_t = torch.sqrt(sigma2) * z[:, t, :]
+            eps_prev = eps_t
+            sigma2_list.append(sigma2)
+
+        return torch.stack(sigma2_list, dim=1)
+
+    def spec(self) -> dict:
+        return {
+            "name": "GARCH11",
+            "T": int(self.T),
+            "omega": self.omega,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "sigma2_0": self.sigma2_0,
+        }

@@ -1,173 +1,115 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Literal
+from typing import Any, Dict, Optional, List, Literal, Union
 import re
 
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib.pyplot as plt
 
 from generators.ESN import ESNGenerator
+from generators.synthetic_generators import ARMA, GARCH11, Noise
+from statsmodels.tsa.stattools import acf as sm_acf
 
 
-def _safe_get(d: Dict[str, Any], key: str, default=None):
-    return d[key] if (d is not None and key in d) else default
+def load_runs_table(out_dir: str = "./runs") -> pd.DataFrame:
+    out_dir = Path(out_dir)
+    rows = []
+    loss_collection = []
 
-
-def _kernel_to_str(kernel: Any) -> str:
-    # best-effort readable identifier
-    cls = kernel.__class__.__name__
-    # common sigma attributes
-    sigma = getattr(kernel, "sigma", None)
-    if sigma is not None:
-        return f"{cls}(sigma={sigma})"
-    # some kernels keep static kernel inside
-    sk = getattr(kernel, "static_kernel", None)
-    if sk is not None:
-        return f"{cls}(static={sk.__class__.__name__})"
-    return cls
-
-
-def _parse_run_folder_name(name: str) -> Dict[str, Optional[str]]:
-    # expected: <run_name>_YYYYMMDD_HHMMSS_<deviceTag>
-    m = re.search(r"(?P<ts>\d{8}_\d{6})_(?P<dev>cpu|cuda\d+)$", name)
-    if not m:
-        return {"timestamp": None, "device_tag": None, "base_name": name}
-    ts = m.group("ts")
-    dev = m.group("dev")
-    base = name[: m.start()]  # everything before timestamp
-    if base.endswith("_"):
-        base = base[:-1]
-    return {"timestamp": ts, "device_tag": dev, "base_name": base}
-
-
-def build_runs_df(
-    runs_dir: str | Path = "./runs",
-    *,
-    recursive: bool = True,
-    prefer: str = "checkpoint",  # "checkpoint" or "final"
-    include_losses_tail: int = 0,  # 0 = don't store tail arrays
-    map_location: str = "cpu",
-) -> pd.DataFrame:
-    """
-    Scan runs_dir for saved runs and return a DataFrame with configs + key outcomes.
-
-    Assumes each run folder may contain:
-      - checkpoint.pt (preferred) with keys: epoch, losses, avg_losses, best_avg_loss, best_epoch, lr_drops_used, config
-      - losses.npy / avg_losses.npy (optional, can be used if checkpoint missing)
-
-    prefer:
-      - "checkpoint": use checkpoint.pt if present
-      - "final": fall back to losses.npy/avg_losses.npy more aggressively
-    """
-    runs_dir = Path(runs_dir)
-    if not runs_dir.exists():
-        raise FileNotFoundError(f"runs_dir does not exist: {runs_dir}")
-
-    run_folders = [p for p in runs_dir.glob("**/*") if p.is_dir()] if recursive else [p for p in runs_dir.iterdir() if p.is_dir()]
-
-    rows: List[Dict[str, Any]] = []
-
-    for run_path in run_folders:
+    for run_path in sorted(out_dir.glob("*")):
         ckpt_path = run_path / "checkpoint.pt"
-        losses_path = run_path / "losses.npy"
-        avg_losses_path = run_path / "avg_losses.npy"
-
-        if prefer == "checkpoint" and not ckpt_path.exists() and not losses_path.exists():
-            continue
-        if prefer == "final" and not losses_path.exists() and not ckpt_path.exists():
+        if not ckpt_path.exists():
             continue
 
-        row: Dict[str, Any] = {"run_path": str(run_path), "run_folder": run_path.name}
-        row.update(_parse_run_folder_name(run_path.name))
+        ckpt = torch.load(ckpt_path, map_location="cpu")
 
-        ckpt = None
-        if ckpt_path.exists():
-            try:
-                ckpt = torch.load(ckpt_path, map_location=map_location)
-            except Exception as e:
-                row["load_error"] = f"checkpoint load failed: {e}"
-                rows.append(row)
-                continue
+        cfg = ckpt.get("config", {})
+        kernel_spec = cfg.get("kernel_spec", None)
 
-        config = _safe_get(ckpt, "config", {}) if ckpt is not None else {}
+        esn_spec = ckpt.get("esn_spec", None)
+        if esn_spec is None:
+            esn_spec = cfg.get("esn_spec", None)
 
-        # config
-        row["kernel_spec"] = _safe_get(config, "kernel_spec", None)
-        row["T"] = _safe_get(config, "T", None)
-        row["batch_size"] = _safe_get(config, "batch_size", None)
-        row["d"] = _safe_get(config, "d", None)
-        row["dtype"] = _safe_get(config, "dtype", None)
-        row["device"] = _safe_get(config, "device", None)
+        target_spec = ckpt.get("target_spec", None)
+        if target_spec is None:
+            target_spec = cfg.get("target_spec", None)
 
-        # training hyperparams
-        row["lr"] = _safe_get(config, "lr", None)
-        row["lr_factor"] = _safe_get(config, "lr_factor", None)
-        row["plateau_patience"] = _safe_get(config, "plateau_patience", None)
-        row["max_lr_drops"] = _safe_get(config, "max_lr_drops", None)
-        row["early_stopping_patience"] = _safe_get(config, "early_stopping_patience", None)
-        row["min_lr"] = _safe_get(config, "min_lr", None)
-        row["num_losses"] = _safe_get(config, "num_losses", None)
-        row["lead_lag"] = _safe_get(config, "lead_lag", None)
-        row["lags"] = _safe_get(config, "lags", None)
+        def _fmt_dict(d: dict | None, keys: list[str]) -> dict:
+            if not isinstance(d, dict):
+                return {k: None for k in keys}
+            out = {}
+            for k in keys:
+                out[k] = d.get(k, None)
+            return out
 
-        # outcomes
-        row["epoch_last"] = _safe_get(ckpt, "epoch", None)
-        row["best_avg_loss"] = _safe_get(ckpt, "best_avg_loss", None)
-        row["best_epoch"] = _safe_get(ckpt, "best_epoch", None)
-        row["lr_drops_used"] = _safe_get(ckpt, "lr_drops_used", None)
+        base = {
+            "run_id": run_path.name,
+            "run_path": str(run_path),
+            "epoch": int(ckpt.get("epoch", -1)),
+            "best_epoch": int(ckpt.get("best_epoch", -1)),
+            "best_avg_loss": float(ckpt.get("best_avg_loss", float("nan"))),
+            "lr_drops_used": int(ckpt.get("lr_drops_used", 0)),
+            "target_noise_spec": _fmt_dict(cfg.get("target_noise_spec", None), ["kind", "params"]),
+        }
 
-        # losses and derived summaries
-        losses = _safe_get(ckpt, "losses", None)
-        avg_losses = _safe_get(ckpt, "avg_losses", None)  # may not exist in older runs
+        # Kernel columns (compact)
+        if isinstance(kernel_spec, dict):
+            base["kernel_mode"] = kernel_spec.get("kernel_mode")
+            base["kernel_spec"] = kernel_spec.get("kernel_str") or kernel_spec.get("kernel_name")
+        else:
+            base["kernel_mode"] = cfg.get("kernel_mode", None)
+            base["kernel_spec"] = None
 
-        # fallback to npy files
-        if losses is None and losses_path.exists():
-            losses = np.load(losses_path).tolist()
-        if avg_losses is None and avg_losses_path.exists():
-            avg_losses = np.load(avg_losses_path).tolist()
+        # ESN columns (compact)
+        if isinstance(esn_spec, dict):
+            base.update({
+                "esn_h": getattr(esn_spec.get("A", None), "shape", [None, None])[0] if hasattr(esn_spec.get("A", None), "shape") else None,
+                "esn_m": getattr(esn_spec.get("C", None), "shape", [None, None])[1] if hasattr(esn_spec.get("C", None), "shape") else None,
+                "esn_out_dim": esn_spec.get("out_dim", None),
+                "esn_activation": esn_spec.get("activation", None),
+                "esn_xi_scale": esn_spec.get("xi_scale", None),
+                "esn_eta_scale": esn_spec.get("eta_scale", None),
+                "esn_target_rho": esn_spec.get("target_rho", None),
+            })
+        else:
+            base.update({"esn_h": None, "esn_m": None, "esn_out_dim": None, "esn_activation": None, "esn_xi_scale": None, "esn_eta_scale": None, "esn_target_rho": None})
 
-        if losses is not None:
-            row["n_epochs_ran"] = len(losses)
-            row["final_loss"] = float(losses[-1])
-        if avg_losses is not None:
-            row["final_avg_loss"] = float(avg_losses[-1])
+        # Target generator columns (ARMA / GARCH friendly)
+        if isinstance(target_spec, dict):
+            base["target_name"] = target_spec.get("name", None)
+            base["target_T"] = target_spec.get("T", None)
+            base["target_p"] = target_spec.get("p", None)
+            base["target_q"] = target_spec.get("q", None)
+            base["target_phi"] = target_spec.get("phi", None)
+            base["target_theta"] = target_spec.get("theta", None)
+            base["target_omega"] = target_spec.get("omega", None)
+            base["target_alpha"] = target_spec.get("alpha", None)
+            base["target_beta"] = target_spec.get("beta", None)
+        else:
+            base.update({"target_name": None, "target_T": None, "target_p": None, "target_q": None,
+                         "target_phi": None, "target_theta": None, "target_omega": None, "target_alpha": None, "target_beta": None, "target_noise_spec": None})
 
-        if include_losses_tail > 0 and losses is not None:
-            row["losses_tail"] = losses[-include_losses_tail:]
-        if include_losses_tail > 0 and avg_losses is not None:
-            row["avg_losses_tail"] = avg_losses[-include_losses_tail:]
-
-        rows.append(row)
+        rows.append(base)
 
     df = pd.DataFrame(rows)
 
-    # nice ordering if present
-    preferred_cols = [
-        "base_name", "timestamp", "device_tag", "run_folder",
-        "kernel_spec", "T", "batch_size", "d",
-        "lr", "lr_factor", "plateau_patience", "max_lr_drops", "early_stopping_patience", "num_losses",
-        "best_avg_loss", "best_epoch", "final_avg_loss", "final_loss", "n_epochs_ran", "lr_drops_used",
+    # Nicely order columns
+    col_order = [
+        "run_id", "best_avg_loss", "best_epoch", "epoch", "lr_drops_used",
+        "kernel_mode", "kernel_spec",
+        "esn_h", "esn_m", "esn_out_dim", "esn_activation", "esn_xi_scale", "esn_eta_scale", "esn_target_rho",
+        "target_name", "target_T", "target_p", "target_q", "target_phi", "target_theta", "target_omega", "target_alpha", "target_beta", "target_noise_spec",
         "run_path",
     ]
-    cols = [c for c in preferred_cols if c in df.columns] + [c for c in df.columns if c not in preferred_cols]
-    df = df[cols]
+    keep = [c for c in col_order if c in df.columns]
+    df = df[keep].sort_values("best_avg_loss", ascending=True, na_position="last").reset_index(drop=True)
 
-    losses = {
-        "losses": losses,
-        "avg_losses": avg_losses,
-    }
+    return df
 
-
-    return df, losses
-
-
-# Get generator ------------------------------------------------------------------
-from pathlib import Path
-from typing import Literal, Union
-import torch
-
+# load esn ------------------------------------------------------------------
 def load_esn_from_run(
     run_path: Union[str, Path],
     *,
@@ -177,7 +119,6 @@ def load_esn_from_run(
 ):
     run_path = Path(run_path)
 
-    # load checkpoint for spec
     ckpt = torch.load(run_path / "checkpoint.pt", map_location="cpu")
     spec = ckpt["esn_spec"]
 
@@ -188,6 +129,7 @@ def load_esn_from_run(
     xi_scale = float(spec.get("xi_scale", 1.0))
     eta_scale = float(spec.get("eta_scale", 1.0))
     t_tilt = spec.get("t_tilt", None)
+    target_rho = float(spec.get("target_rho", 0.9))
 
     esn = ESNGenerator(
         A=A,
@@ -197,10 +139,9 @@ def load_esn_from_run(
         xi_scale=xi_scale,
         eta_scale=eta_scale,
         t_tilt=t_tilt,
-        target_rho=0.9,  # ignored effectively since A already stored scaled
+        target_rho=target_rho,  # informative only; A already stored
     )
 
-    # load parameters
     if which == "best":
         state = torch.load(run_path / "best_model.pt", map_location="cpu")
         esn.load_state_dict(state)
@@ -212,13 +153,158 @@ def load_esn_from_run(
     else:
         raise ValueError("which must be 'best', 'final', or 'checkpoint'")
 
-    # move to requested device/dtype
-    esn = esn.to(map_location)
+    esn = esn.to(device=map_location)
     if dtype is not None:
         esn = esn.to(dtype=dtype)
     esn.eval()
     return esn
 
-
 def load_esn_from_df(df: pd.DataFrame, row: int, **load_kwargs):
     return load_esn_from_run(df.loc[row, "run_path"], **load_kwargs)
+
+
+# ---------- Target generator reconstruction ----------
+def build_noise_from_spec(spec: dict | None):
+    if spec is None:
+        return None
+    return Noise(kind=spec["kind"], params=spec.get("params", None))
+
+def build_target_from_spec(spec: dict):
+    name = spec.get("name", None)
+    if name is None:
+        raise ValueError("Target spec has no 'name' field.")
+
+    if name == "ARMA":
+        T = int(spec["T"])
+        p = int(spec["p"])
+        q = int(spec["q"])
+        phi = spec.get("phi", None)
+        theta = spec.get("theta", None)
+        d = int(spec.get("d", 1))
+        return ARMA(T=T, p=p, q=q, phi=phi, theta=theta, d=d)
+
+    if name == "GARCH11":
+        T = int(spec["T"])
+        omega = float(spec["omega"])
+        alpha = float(spec["alpha"])
+        beta = float(spec["beta"])
+        sigma2_0 = float(spec.get("sigma2_0", 1.0))
+        d = int(spec.get("d", 1))
+        return GARCH11(T=T, omega=omega, alpha=alpha, beta=beta, d=d, sigma2_0=sigma2_0)
+
+    raise ValueError(f"Unknown target generator name: {name}")
+
+def load_target_and_noise_from_run(
+    run_path,
+    *,
+    map_location="cpu",
+    dtype=None,
+):
+    run_path = Path(run_path)
+    ckpt = torch.load(run_path / "checkpoint.pt", map_location="cpu")
+
+    cfg = ckpt["config"]
+
+    if "target_spec" not in cfg:
+        raise ValueError("Checkpoint does not contain 'target_spec'.")
+
+    target = build_target_from_spec(cfg["target_spec"])
+
+    noise = build_noise_from_spec(cfg.get("target_noise_spec", None))
+
+    target = target.to(device=map_location)
+    if dtype is not None:
+        target = target.to(dtype=dtype)
+    target.eval()
+
+    return target, noise
+
+def load_target_and_noise_from_df(df, row: int, **load_kwargs):
+    return load_target_and_noise_from_run(df.loc[row, "run_path"], **load_kwargs)
+
+
+# ACF analysis ----------------------------------------------------------------------
+def acf_compare(
+    *,
+    esn,
+    generator,
+    N: int,
+    T: int,
+    lag: int = 40,
+    noise=None,
+    component: int = 0,
+    show_example: bool = True,
+):
+    """
+    Samples N paths of length T from:
+      - target: generator.generate(...)
+      - model:  esn(...)
+
+    Plots ACF of x_t and of x_t^2, side by side (Target vs ESN).
+    Returns the averaged ACF arrays.
+
+    Assumes x_t is already the series of interest (no prices, no returns transform).
+    """
+    if T < 2:
+        raise ValueError("Need T >= 2.")
+    lag_eff = int(min(lag, T - 1))
+    lags = np.arange(lag_eff + 1)
+
+    esn.eval()
+    generator.eval()
+
+    with torch.no_grad():
+        X = generator.generate(N=N, T=T, noise=noise).detach().cpu()
+        Z = esn(T=T, N=N).detach().cpu()
+
+    def mean_acf(paths_3d: torch.Tensor, square: bool) -> np.ndarray:
+        A = np.empty((paths_3d.shape[0], lag_eff + 1), dtype=float)
+        for i in range(paths_3d.shape[0]):
+            x = paths_3d[i, :, component].numpy()
+            if square:
+                x = x * x
+            A[i, :] = sm_acf(x, nlags=lag_eff, fft=True)
+        return A.mean(axis=0)
+
+    acf_X = mean_acf(X, square=False)
+    acf_Z = mean_acf(Z, square=False)
+    acf2_X = mean_acf(X, square=True)
+    acf2_Z = mean_acf(Z, square=True)
+
+    if show_example:
+        fig, ax = plt.subplots(2, 1, figsize=(12, 5), sharex=True)
+        ax[0].plot(X[0, :, component].numpy())
+        ax[0].set_title("Target example path")
+        ax[1].plot(Z[0, :, component].numpy())
+        ax[1].set_title("ESN example path")
+        ax[1].set_xlabel("t")
+        plt.tight_layout()
+        plt.show()
+
+    fig, ax = plt.subplots(2, 2, figsize=(12, 6), sharex=True)
+
+    ax[0, 0].stem(lags, acf_X, basefmt=" ")
+    ax[0, 0].set_title("Target ACF of x_t")
+    ax[0, 1].stem(lags, acf_Z, basefmt=" ")
+    ax[0, 1].set_title("ESN ACF of x_t")
+
+    ax[1, 0].stem(lags, acf2_X, basefmt=" ")
+    ax[1, 0].set_title("Target ACF of x_t^2")
+    ax[1, 1].stem(lags, acf2_Z, basefmt=" ")
+    ax[1, 1].set_title("ESN ACF of x_t^2")
+
+    ax[1, 0].set_xlabel("lag")
+    ax[1, 1].set_xlabel("lag")
+    ax[0, 0].set_ylabel("acf")
+    ax[1, 0].set_ylabel("acf")
+
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        "lags": lags,
+        "target_acf": acf_X,
+        "esn_acf": acf_Z,
+        "target_acf_sq": acf2_X,
+        "esn_acf_sq": acf2_Z,
+    }

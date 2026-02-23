@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-
+from statsmodels.tsa.stattools import acf as sm_acf
 
 def plot_loss_from_run(
     results: dict,
@@ -58,16 +60,10 @@ def plot_loss_from_run(
             ckpt = torch.load(ckpt_path, map_location="cpu")
 
             best_epoch = ckpt.get("best_epoch", None)
-            lr_drops_used = ckpt.get("lr_drops_used", None)
-            # We did not store full LR history, only current state,
-            # so LR overlay is limited unless you later log LR per epoch.
+            best_loss = ckpt.get("best_avg_loss", None)
 
             if mark_best_and_drops and best_epoch is not None:
                 ax.axvline(best_epoch, color="green", linestyle="--", alpha=0.7, label="best epoch")
-
-            # If you later store lr history, we can plot it here.
-            if overlay_lr:
-                print("Note: LR history not stored per epoch yet. Overlay skipped.")
 
     ax.legend()
     plt.tight_layout()
@@ -76,6 +72,8 @@ def plot_loss_from_run(
     return {
         "losses": losses,
         "avg_losses": avg_losses,
+        "best_epoch": best_epoch,
+        "best_avg_loss": best_loss,
     }
 
 
@@ -116,7 +114,7 @@ def inspect_run_and_mmd(
 
     T0 = int(kwargs["T"] if T_plot is None else T_plot)
 
-    # ---------------- NEW: load best model weights if requested ----------------
+    # ---------------- load best model weights if requested ----------------
     if use_best:
         if results is None or "run_path" not in results:
             raise ValueError("use_best=True requires results['run_path']")
@@ -201,3 +199,162 @@ def inspect_run_and_mmd(
         return {"run_path": results["run_path"], "mmd": mmd_value}
     else:
         return {"mmd": mmd_value}
+
+# ACF analysis function ----------------------------------------------------------------------
+def acf_analysis(
+    results: dict | None,
+    kwargs: dict,
+    *,
+    T_acf: int | None = None,
+    lag_acf: int = 40,
+    N_paths: int = 100,
+    component: int = 0,
+    noise: object | None = None,
+    use_best: bool = False,
+    show_paths: bool = True,
+):
+    esn = kwargs["esn"]
+    target_generator = kwargs.get("target_generator", None)
+    dataloader = kwargs.get("dataloader", None)
+
+    if target_generator is None and dataloader is None:
+        raise ValueError("kwargs must contain either target_generator or dataloader.")
+
+    dtype = kwargs.get("dtype", torch.float64)
+    device = kwargs.get("device", esn.W.device)
+
+    if T_acf is None:
+        if "T" not in kwargs:
+            raise ValueError("Provide T_acf or kwargs['T'].")
+        T_acf = int(kwargs["T"])
+    else:
+        T_acf = int(T_acf)
+
+    if T_acf < 2:
+        raise ValueError("Need T_acf >= 2.")
+
+    # load best model weights if requested
+    if use_best:
+        if results is None or "run_path" not in results:
+            raise ValueError("use_best=True requires results['run_path']")
+        run_path = Path(results["run_path"])
+        best_path = run_path / "best_model.pt"
+        ckpt_path = run_path / "checkpoint.pt"
+
+        if best_path.exists():
+            esn.load_state_dict(torch.load(best_path, map_location="cpu"))
+        elif ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+            if "esn_state_dict" not in ckpt:
+                raise ValueError("checkpoint.pt does not contain 'esn_state_dict'")
+            esn.load_state_dict(ckpt["esn_state_dict"])
+        else:
+            raise FileNotFoundError("No best_model.pt or checkpoint.pt found.")
+
+    esn = esn.to(device=device, dtype=dtype)
+    esn.eval()
+
+    # sample target and esn paths: (N_paths, T_acf, d)
+    with torch.no_grad():
+        if dataloader is not None:
+            batch = next(iter(dataloader))
+            X_tgt = batch[0] if isinstance(batch, (tuple, list)) else batch
+            if X_tgt.ndim != 3:
+                raise ValueError(f"dataloader must yield (B,T,d); got {tuple(X_tgt.shape)}")
+            X_tgt = X_tgt[:N_paths, :T_acf, :].detach().cpu().to(dtype=dtype)
+            if X_tgt.shape[0] < N_paths:
+                raise ValueError("Need dataloader batch_size >= N_paths.")
+        else:
+            if hasattr(target_generator, "generate"):
+                # assumes your generator supports overriding T
+                X_tgt = target_generator.generate(N=N_paths, T=T_acf, noise=noise)
+            else:
+                X_tgt = target_generator(T=T_acf, N=N_paths, noise=noise)
+            if not isinstance(X_tgt, torch.Tensor) or X_tgt.ndim != 3:
+                raise ValueError("target_generator must return a Tensor with shape (N,T,d).")
+            X_tgt = X_tgt.detach().cpu().to(dtype=dtype)
+
+        Z_esn = esn(T=T_acf, N=N_paths).detach().cpu().to(dtype=dtype)
+
+    # Effective max lag cannot exceed T-1
+    lag_eff = min(int(lag_acf), int(T_acf - 1))
+    lags = np.arange(lag_eff + 1)
+
+    def mean_acf_over_paths(X_3d: torch.Tensor, *, square: bool) -> np.ndarray:
+        """
+        Input X_3d: (N_paths, T, d)
+        For each path i, take the 1D series x_i(t) = X_3d[i, :, component].
+
+        If square=False:
+          compute ACF of x_i(t).
+
+        If square=True:
+          compute ACF of x_i(t)^2.
+
+        Then average the resulting ACF vectors over i=1..N_paths.
+
+        statsmodels.tsa.stattools.acf returns:
+          a[0] = 1 by definition
+          a[k] ~ sample Corr(x_t, x_{t-k})
+        It automatically subtracts the sample mean before computing autocovariances.
+        """
+        A = np.empty((X_3d.shape[0], lag_eff + 1), dtype=float)
+        for i in range(X_3d.shape[0]):
+            x = X_3d[i, :, component].numpy()
+            if square:
+                x = x * x
+            # nlags cannot exceed len(x)-1, but lag_eff already respects T-1
+            A[i, :] = sm_acf(x, nlags=lag_eff, fft=True)
+        return A.mean(axis=0)
+
+    # ACF(x) and ACF(x^2) for target and esn
+    acf_tgt = mean_acf_over_paths(X_tgt, square=False)
+    acf_esn = mean_acf_over_paths(Z_esn, square=False)
+    acf2_tgt = mean_acf_over_paths(X_tgt, square=True)
+    acf2_esn = mean_acf_over_paths(Z_esn, square=True)
+
+    if show_paths:
+        fig, ax = plt.subplots(2, 1, figsize=(12, 5), sharex=True)
+        ax[0].plot(X_tgt[0, :, component].numpy())
+        ax[0].set_title("Target example path")
+        ax[1].plot(Z_esn[0, :, component].numpy())
+        ax[1].set_title("ESN example path")
+        ax[1].set_xlabel("t")
+        plt.tight_layout()
+        plt.show()
+
+    # ACF plots: 2 rows (x and x^2), 2 cols (target and ESN)
+    fig, ax = plt.subplots(2, 2, figsize=(12, 6), sharex=True)
+
+    ax[0, 0].stem(lags, acf_tgt, basefmt=" ")
+    ax[0, 0].set_title("Target ACF of x_t")
+    ax[0, 1].stem(lags, acf_esn, basefmt=" ")
+    ax[0, 1].set_title("ESN ACF of x_t")
+
+    ax[1, 0].stem(lags, acf2_tgt, basefmt=" ")
+    ax[1, 0].set_title("Target ACF of x_t^2")
+    ax[1, 1].stem(lags, acf2_esn, basefmt=" ")
+    ax[1, 1].set_title("ESN ACF of x_t^2")
+
+    for j in range(2):
+        ax[1, j].set_xlabel("lag")
+    for i in range(2):
+        ax[i, 0].set_ylabel("acf")
+
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        "run_path": None if results is None else results.get("run_path"),
+        "T_acf": int(T_acf),
+        "lag_eff": int(lag_eff),
+        "N_paths": int(N_paths),
+        "component": int(component),
+        "acf": {
+            "lags": lags,
+            "target_x": acf_tgt,
+            "esn_x": acf_esn,
+            "target_x2": acf2_tgt,
+            "esn_x2": acf2_esn,
+        },
+    }

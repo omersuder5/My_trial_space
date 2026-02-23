@@ -20,6 +20,7 @@ def _sample_target(
     dataloader: Optional[DataLoader],
     dl_it: Optional[iter],
     target_generator: Optional[Any],
+    noise: Optional[Any],
     batch_size: int,
     T: int,
     d: int,
@@ -52,9 +53,9 @@ def _sample_target(
 
     if target_generator is not None:
         if hasattr(target_generator, "generate"):
-            X = target_generator.generate(N=batch_size)
+            X = target_generator.generate(T=T, N=batch_size, noise=noise)
         else:
-            X = target_generator(T=T, N=batch_size)
+            X = target_generator(T=T, N=batch_size, noise=noise)
 
         X = X.to(device=device, dtype=dtype)
 
@@ -79,6 +80,7 @@ def train_ESN_MMD(
     d: Optional[int] = None,                   # NEW: allow explicit d; defaults to esn.d
     dataloader: Optional[DataLoader] = None,
     target_generator: Optional[Any] = None,
+    noise: Optional[Any] = None,  
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float64,
     **kwargs,
@@ -90,6 +92,7 @@ def train_ESN_MMD(
 
     Exactly one must be provided.
     """
+    print(noise)
     # defaults
     lr: float = float(kwargs.get("lr", 1e-3))
     lead_lag: bool = bool(kwargs.get("lead_lag", False))
@@ -172,11 +175,14 @@ def train_ESN_MMD(
             torch.set_rng_state(checkpoint["torch_rng_state"])
 
     pbar = tqdm(range(start_epoch, epochs), desc="train")
+
+    # TRAINING LOOP
     for epoch in pbar:
         X, dl_it = _sample_target(
             dataloader=dataloader,
             dl_it=dl_it,
             target_generator=target_generator,
+            noise=noise,  
             batch_size=batch_size,
             T=T,
             d=d_expected,          # NEW: use d_expected
@@ -204,6 +210,7 @@ def train_ESN_MMD(
 
         epoch_loss = float(loss.detach().cpu())
         losses.append(epoch_loss)
+        # END OF RELEVANT TRAINING LOOP CODE (START OF CHECKPOINTING AND EARLY STOPPING CODE)
 
         last_k.append(epoch_loss)
         avg_k = float(np.mean(last_k)) if len(last_k) else epoch_loss
@@ -267,6 +274,8 @@ def train_ESN_MMD(
                 ")"
             )
 
+            target_spec = dataloader.dataset.__class__.__name__ if dataloader is not None else _target_spec_from_obj(target_generator)
+
             ckpt = {
                 "epoch": epoch,
                 "esn_state_dict": esn.state_dict(),
@@ -282,18 +291,14 @@ def train_ESN_MMD(
                 "config": {
                     "kernel_mode": kernel_mode,
                     "kernel_spec": kernel_spec,
+                    "target_spec": target_spec,
+                    "target_noise_spec": None if noise is None else noise.spec() if hasattr(noise, "spec") and callable(noise.spec) else str(noise),
                     "T": T,
                     "epochs": epochs,
                     "batch_size": batch_size,
                     "d": d_expected,
                     "dtype": str(dtype),
                     "device": str(device),
-                    "generator_type": (
-                        "dataloader" if dataloader is not None else "target_generator"
-                    ),
-                    "generator_class": (
-                        dataloader.dataset.__class__.__name__ if dataloader is not None else target_generator.__class__.__name__
-                    ),
                     # kwargs snapshot
                     "lr": lr,
                     "lead_lag": lead_lag,
@@ -345,6 +350,37 @@ def train_ESN_MMD(
         "lr_drops_used": lr_drops_used,
         "final_lr": opt.param_groups[0]["lr"],
         "run_path": str(run_path),
-        "run_path": str(run_path),
         "run_id": run_id,
     }
+
+
+# Helper to extract target generator specs for checkpointing and analysis
+def _target_spec_from_obj(target_generator: object | None) -> dict | None:
+    if target_generator is None:
+        return None
+
+    # best: explicit method
+    if hasattr(target_generator, "spec") and callable(target_generator.spec):
+        s = target_generator.spec()
+        if not isinstance(s, dict):
+            raise TypeError("target_generator.spec() must return a dict")
+        return s
+
+    # fallback: common ARMA-like attributes
+    keys = ["T", "p", "q", "phi", "theta", "omega", "alpha", "beta"]
+    out = {"name": target_generator.__class__.__name__}
+    for k in keys:
+        if hasattr(target_generator, k):
+            v = getattr(target_generator, k)
+            if isinstance(v, (list, tuple)):
+                out[k] = [float(x) for x in v]
+            elif torch.is_tensor(v):
+                out[k] = v.detach().cpu().flatten().tolist()
+            elif v is None:
+                out[k] = None
+            else:
+                try:
+                    out[k] = float(v) if isinstance(v, (int, float, np.number)) else v
+                except Exception:
+                    out[k] = str(v)
+    return out
