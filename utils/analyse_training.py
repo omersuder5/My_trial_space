@@ -359,3 +359,64 @@ def acf_analysis(
             "esn_x2": acf2_esn,
         },
     }
+
+
+# W history analysis function ----------------------------------------------------------------------
+def plot_W_history_vs_fixed(
+    run_path: str | Path,
+    W_fixed: torch.Tensor,
+    *,
+    use_fro: bool = False,
+):
+    """
+    Loads:
+      - W_history.pt  (list of tensors, one per epoch)
+      - losses.npy    (your training loss per epoch, here MMD)
+
+    Plots:
+      - MSE(W_epoch, W_fixed) (or Frobenius distance if use_fro=True)
+      - training loss
+
+    Assumes W_fixed has shape (d,h) like each W in history.
+    """
+    run_path = Path(run_path)
+
+    W_hist = torch.load(run_path / "W_history.pt", map_location="cpu")  # list[Tensor]
+    losses = np.load(run_path / "losses.npy")  # (n_epochs_saved,)
+
+    # stack to (E,d,h)
+    W_stack = torch.stack([w.detach().cpu() for w in W_hist], dim=0)
+    W_fixed = W_fixed.detach().cpu()
+
+    if W_fixed.shape != W_stack.shape[1:]:
+        raise ValueError(f"Shape mismatch: W_fixed {tuple(W_fixed.shape)} vs W_hist item {tuple(W_stack.shape[1:])}")
+
+    diff = W_stack - W_fixed.unsqueeze(0)  # (E,d,h)
+
+    if use_fro:
+        # Frobenius norm per epoch
+        dist = torch.linalg.norm(diff.reshape(diff.shape[0], -1), dim=1).numpy()
+        ylab = "||W_epoch - W_fixed||_F"
+    else:
+        # mean squared error per epoch
+        dist = (diff ** 2).mean(dim=(1, 2)).numpy()
+        ylab = "MSE(W_epoch, W_fixed)"
+
+    epochs = np.arange(len(dist))
+
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax[0].plot(epochs, dist)
+    ax[0].set_xlabel("epoch")
+    ax[0].set_ylabel(ylab)
+    ax[0].set_title("W evolution vs fixed W")
+
+    ax[1].plot(np.arange(len(losses)), losses)
+    ax[1].set_xlabel("epoch")
+    ax[1].set_ylabel("training loss (MMD)")
+    ax[1].set_title("Training loss")
+
+    plt.tight_layout()
+    plt.show()
+
+    return {"epochs": epochs, "W_mse": dist, "losses": losses}

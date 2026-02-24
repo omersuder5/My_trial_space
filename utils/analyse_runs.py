@@ -90,9 +90,10 @@ def load_runs_table(out_dir: str = "./runs") -> pd.DataFrame:
             base["target_omega"] = target_spec.get("omega", None)
             base["target_alpha"] = target_spec.get("alpha", None)
             base["target_beta"] = target_spec.get("beta", None)
+            base["target_sigma2_0"] = target_spec.get("sigma2_0", None)
         else:
             base.update({"target_name": None, "target_T": None, "target_p": None, "target_q": None,
-                         "target_phi": None, "target_theta": None, "target_omega": None, "target_alpha": None, "target_beta": None, "target_noise_spec": None})
+                         "target_phi": None, "target_theta": None, "target_omega": None, "target_alpha": None, "target_beta": None, "target_noise_spec": None, "target_sigma2_0": None})
 
         rows.append(base)
 
@@ -103,7 +104,7 @@ def load_runs_table(out_dir: str = "./runs") -> pd.DataFrame:
         "run_id", "best_avg_loss", "best_epoch", "epoch", "lr_drops_used",
         "kernel_mode", "kernel_spec",
         "esn_h", "esn_m", "esn_out_dim", "esn_activation", "esn_xi_scale", "esn_eta_scale", "esn_target_rho", "esn_xi_ma_theta", "esn_quad_gain",
-        "target_name", "target_T", "target_p", "target_q", "target_phi", "target_theta", "target_omega", "target_alpha", "target_beta", "target_noise_spec",
+        "target_name", "target_T", "target_p", "target_q", "target_phi", "target_theta", "target_omega", "target_alpha", "target_beta", "target_noise_spec", "target_sigma2_0",
         "run_path",
     ]
     keep = [c for c in col_order if c in df.columns]

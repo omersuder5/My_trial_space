@@ -149,6 +149,7 @@ def train_ESN_MMD(
     start_epoch = 0
     losses: List[float] = []
     avg_losses: List[float] = []
+    W_history: List[Tensor] = []
     last_k: Deque[float] = deque(maxlen=num_losses)
     best_avg_loss = float("inf")
     best_epoch = -1
@@ -215,6 +216,7 @@ def train_ESN_MMD(
         last_k.append(epoch_loss)
         avg_k = float(np.mean(last_k)) if len(last_k) else epoch_loss
         avg_losses.append(avg_k)
+        W_history.append(esn.W.detach().cpu().clone())
 
         lr_now = opt.param_groups[0]["lr"]
         pbar.set_postfix(loss=epoch_loss, avg_k=avg_k, lr=lr_now, drops=lr_drops_used)
@@ -342,6 +344,7 @@ def train_ESN_MMD(
             break
 
     torch.save(esn.state_dict(), run_path / "final_model.pt")
+    torch.save(W_history, run_path / "W_history.pt")
     np.save(run_path / "losses.npy", np.asarray(losses, dtype=np.float64))
     np.save(run_path / "avg_losses.npy", np.asarray(avg_losses, dtype=np.float64))
 

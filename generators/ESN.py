@@ -229,3 +229,15 @@ class ESNGenerator(nn.Module):
                 Xhist[:, t, :] = x
 
         return (Z, Xhist) if return_states else Z
+
+
+class ESNAsTarget(nn.Module):
+    def __init__(self, esn: nn.Module, T_default: int):
+        super().__init__()
+        self.esn = esn
+        self.T_default = int(T_default)
+
+    @torch.no_grad()
+    def generate(self, *, N: int, T: int | None = None, noise=None):
+        T_use = self.T_default if T is None else int(T)
+        return self.esn(T=T_use, N=N)

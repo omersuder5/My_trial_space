@@ -159,6 +159,12 @@ class GARCH11(Proc):
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.sigma2_0 = float(sigma2_0)
+        if self.omega <= 0:
+            raise ValueError("omega must be > 0")
+        if self.alpha < 0 or self.beta < 0:
+            raise ValueError("alpha, beta must be >= 0")
+        if self.alpha + self.beta >= 1:
+            raise ValueError("Need alpha + beta < 1 for (variance) stationarity")
 
     def _gen(self, N: int, z: Tensor) -> Tensor:
         T = z.shape[1]
@@ -191,7 +197,7 @@ class GARCH11(Proc):
             eps_prev = eps_t
             sigma2_list.append(sigma2)
 
-        return torch.stack(sigma2_list, dim=1)
+        return torch.stack(sigma2_list[1:], dim=1)
 
     def spec(self) -> dict:
         return {
