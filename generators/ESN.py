@@ -7,7 +7,6 @@ import torch.nn as nn
 
 Tensor = torch.Tensor
 
-
 def _get_activation(name_or_fn: Union[str, Callable[[Tensor], Tensor]]) -> Callable[[Tensor], Tensor]:
     if callable(name_or_fn):
         return name_or_fn
@@ -21,6 +20,23 @@ def _get_activation(name_or_fn: Union[str, Callable[[Tensor], Tensor]]) -> Calla
     if name == "gelu":
         return torch.nn.functional.gelu
     raise ValueError(f"Unknown activation: {name_or_fn}")
+
+def _ma_filter(e: Tensor, theta: Tensor) -> Tensor:
+    """
+    e: (N,T,m) iid innovations
+    theta: (q,) MA coefficients
+    y_t = e_t + sum_{j=1}^q theta[j-1] e_{t-j}
+    """
+    theta = theta.reshape(-1)
+    q = int(theta.numel())
+    if q == 0:
+        return e
+
+    N, T, m = e.shape
+    y = e.clone()
+    for j in range(1, q + 1):
+        y[:, j:, :] = y[:, j:, :] + theta[j - 1] * e[:, : T - j, :]
+    return y
 
 
 def rescale_spectral_radius(A: Tensor, target_rho: float) -> Tensor:
@@ -68,6 +84,7 @@ class ESNGenerator(nn.Module):
         xi_scale: float = 1.0,
         eta_scale: float = 1.0,
         target_rho: float = 0.9,
+        xi_ma_theta: Optional[Tensor] = None,
         t_tilt: Optional[Tensor] = None,
         W_init_std: float = 0.1,
     ):
@@ -101,12 +118,31 @@ class ESNGenerator(nn.Module):
         else:
             self.register_buffer("t_tilt", torch.as_tensor(t_tilt, device=A.device, dtype=A.dtype), persistent=False)
 
+        if xi_ma_theta is None:
+            self.register_buffer("xi_ma_theta", None, persistent=False)
+        else:
+            self.register_buffer("xi_ma_theta", torch.as_tensor(xi_ma_theta, device=A.device, dtype=A.dtype), persistent=False)
+        if self.xi_ma_theta is not None and self.xi_ma_theta.ndim != 1:
+            raise ValueError("xi_ma_theta must be 1D (q,).")
+
     @torch.no_grad()
     def sample_noise(self, N: int, T: int) -> tuple[Tensor, Tensor]:
-        xi = torch.randn(N, T, self.m, device=self.A.device, dtype=self.A.dtype) * self.xi_scale
-        eta = torch.randn(N, T, self.d, device=self.A.device, dtype=self.A.dtype) * self.eta_scale
-        return xi, eta
+        device, dtype = self.A.device, self.A.dtype
+        xi_ma_theta = self.xi_ma_theta
 
+        # iid innovations
+        xi_e = torch.randn(N, T, self.m, device=device, dtype=dtype) * self.xi_scale
+        eta = torch.randn(N, T, self.d, device=device, dtype=dtype) * self.eta_scale
+
+        # colored input noise
+        if xi_ma_theta is not None:
+            th = torch.as_tensor(xi_ma_theta, device=device, dtype=dtype)
+            xi = _ma_filter(xi_e, th)
+        else:
+            xi = xi_e
+
+        return xi, eta
+    
     def forward(
         self,
         T: int,

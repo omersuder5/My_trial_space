@@ -324,6 +324,7 @@ def train_ESN_MMD(
                 "eta_scale": float(esn.eta_scale),
                 "t_tilt": (None if esn.t_tilt is None else esn.t_tilt.detach().cpu()),
                 "target_rho": float(kwargs.get("target_rho", 0.9)),  # optional, informative only
+                "xi_ma_theta": (None if not hasattr(esn, "xi_ma_theta") or esn.xi_ma_theta is None else esn.xi_ma_theta.detach().cpu()),
             }
             ckpt["esn_spec"] = esn_spec
             torch.save(ckpt, run_path / "checkpoint.pt")
