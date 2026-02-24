@@ -259,11 +259,12 @@ def acf_analysis(
         if dataloader is not None:
             batch = next(iter(dataloader))
             X_tgt = batch[0] if isinstance(batch, (tuple, list)) else batch
+            N_paths = min(X_tgt.shape[0], N_paths)
+            T_acf = min(X_tgt.shape[1], T_acf)
             if X_tgt.ndim != 3:
                 raise ValueError(f"dataloader must yield (B,T,d); got {tuple(X_tgt.shape)}")
             X_tgt = X_tgt[:N_paths, :T_acf, :].detach().cpu().to(dtype=dtype)
-            if X_tgt.shape[0] < N_paths:
-                raise ValueError("Need dataloader batch_size >= N_paths.")
+                
         else:
             if hasattr(target_generator, "generate"):
                 # assumes your generator supports overriding T
