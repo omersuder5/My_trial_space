@@ -74,9 +74,10 @@ def load_runs_table(out_dir: str = "./runs") -> pd.DataFrame:
                 "esn_eta_scale": esn_spec.get("eta_scale", None),
                 "esn_target_rho": esn_spec.get("target_rho", None),
                 "esn_xi_ma_theta": esn_spec.get("xi_ma_theta", None).tolist() if isinstance(esn_spec.get("xi_ma_theta", None), torch.Tensor) else esn_spec.get("xi_ma_theta", None),
+                "esn_quad_gain": esn_spec.get("quad_gain", None),
             })
         else:
-            base.update({"esn_h": None, "esn_m": None, "esn_out_dim": None, "esn_activation": None, "esn_xi_scale": None, "esn_eta_scale": None, "esn_target_rho": None, "esn_xi_ma_theta": None})
+            base.update({"esn_h": None, "esn_m": None, "esn_out_dim": None, "esn_activation": None, "esn_xi_scale": None, "esn_eta_scale": None, "esn_target_rho": None, "esn_xi_ma_theta": None, "esn_quad_gain": None})
 
         # Target generator columns (ARMA / GARCH friendly)
         if isinstance(target_spec, dict):
@@ -101,7 +102,7 @@ def load_runs_table(out_dir: str = "./runs") -> pd.DataFrame:
     col_order = [
         "run_id", "best_avg_loss", "best_epoch", "epoch", "lr_drops_used",
         "kernel_mode", "kernel_spec",
-        "esn_h", "esn_m", "esn_out_dim", "esn_activation", "esn_xi_scale", "esn_eta_scale", "esn_target_rho", "esn_xi_ma_theta",
+        "esn_h", "esn_m", "esn_out_dim", "esn_activation", "esn_xi_scale", "esn_eta_scale", "esn_target_rho", "esn_xi_ma_theta", "esn_quad_gain",
         "target_name", "target_T", "target_p", "target_q", "target_phi", "target_theta", "target_omega", "target_alpha", "target_beta", "target_noise_spec",
         "run_path",
     ]
@@ -132,6 +133,8 @@ def load_esn_from_run(
     t_tilt = spec.get("t_tilt", None)
     target_rho = float(spec.get("target_rho", 0.9))
     xi_ma_theta = spec.get("xi_ma_theta", None)
+    quad_feedback = spec.get("quad_feedback", False)
+    quad_gain = float(spec.get("quad_gain", 0.0)) if spec.get("quad_gain", None) is not None else 0.0
 
     esn = ESNGenerator(
         A=A,
@@ -143,6 +146,8 @@ def load_esn_from_run(
         t_tilt=t_tilt,
         target_rho=target_rho,  # informative only; A already stored
         xi_ma_theta=xi_ma_theta,
+        quad_feedback=quad_feedback,
+        quad_gain=quad_gain,
     )
 
     if which == "best":

@@ -325,6 +325,8 @@ def train_ESN_MMD(
                 "t_tilt": (None if esn.t_tilt is None else esn.t_tilt.detach().cpu()),
                 "target_rho": float(kwargs.get("target_rho", 0.9)),  # optional, informative only
                 "xi_ma_theta": (None if not hasattr(esn, "xi_ma_theta") or esn.xi_ma_theta is None else esn.xi_ma_theta.detach().cpu()),
+                "quad_gain": float(esn.quad_gain) if esn.quad_feedback else None,
+                "quad_feedback": bool(esn.quad_feedback),
             }
             ckpt["esn_spec"] = esn_spec
             torch.save(ckpt, run_path / "checkpoint.pt")

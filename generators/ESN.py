@@ -87,6 +87,9 @@ class ESNGenerator(nn.Module):
         xi_ma_theta: Optional[Tensor] = None,
         t_tilt: Optional[Tensor] = None,
         W_init_std: float = 0.1,
+        quad_feedback: bool = False,
+        quad_gain: float = 0.1,
+        train_quad: bool = False,
     ):
         super().__init__()
         A = torch.as_tensor(A)
@@ -101,6 +104,19 @@ class ESNGenerator(nn.Module):
         self.m = int(C.shape[1])
         self.d = int(out_dim)
 
+        # Quadratic feedback in the reservoir
+        self.quad_feedback = bool(quad_feedback)
+        if self.quad_feedback:
+            self.quad_gain = float(quad_gain)
+            G0 = float(quad_gain) * torch.randn(self.h, self.h, device=A.device, dtype=A.dtype) / (self.h ** 0.5)
+            if train_quad:
+                self.G_quad = nn.Parameter(G0)
+            else:
+                self.register_buffer("G_quad", G0)
+        else:
+            self.register_buffer("G_quad", None, persistent=False)
+
+        # Rescale A to have spectral radius target_rho < 1 for echo state property, and register buffers/parameters
         A = rescale_spectral_radius(A, float(target_rho))
         self.register_buffer("A", A)
         self.register_buffer("C", C)
@@ -201,7 +217,10 @@ class ESNGenerator(nn.Module):
         act = self.activation
 
         for t in range(T):
-            x = act(x @ A.T + xi[:, t, :] @ C.T)
+            pre = x @ A.T + xi[:, t, :] @ C.T
+            if self.quad_feedback:
+                pre = pre + (x * x) @ self.G_quad.T
+            x = act(pre)
             z = x @ W.T + eta[:, t, :]
             if tilt is not None:
                 z = z + tilt[:, t, :]
