@@ -418,5 +418,71 @@ def plot_W_history_vs_fixed(
 
     plt.tight_layout()
     plt.show()
+    
+    Wf = W_fixed.detach().cpu()
+    Wb = W_stack[-1].detach().cpu()
+
+    mse = ((Wb - Wf)**2).mean().item()
+    mse0 = (Wf**2).mean().item()
+    print("E[W_fixed^2] =", mse0)
+    print("relative MSE  =", mse / (mse0 + 1e-12))
+    print("||W_fixed||_F =", torch.linalg.norm(Wf).item())
+    print("||W_NN||_F =", torch.linalg.norm(Wb).item())
+    print("||diff||_F    =", torch.linalg.norm(Wb - Wf).item())
+    print("Correlation of W_fixed and W_NN =", torch.corrcoef(torch.stack([Wf.flatten(), Wb.flatten()]))[0, 1].item())
+
 
     return {"epochs": epochs, "W_mse": dist, "losses": losses}
+
+@torch.no_grad()
+def plot_terminal_histograms(
+    *,
+    target_generator,
+    esn,
+    N: int,
+    T: int,
+    bins: int = 50,
+    device=None,
+    dtype=None,
+):
+    """
+    Generates N paths of length T from:
+      - target_generator
+      - esn
+
+    Plots histogram of values at time T (last time step) for both.
+
+    Assumes outputs have shape (N, T, d). Uses d=0 component.
+    """
+
+    if device is None:
+        device = esn.A.device
+    if dtype is None:
+        dtype = esn.A.dtype
+
+    # --- generate target ---
+    if hasattr(target_generator, "generate"):
+        X = target_generator.generate(N=N)
+    else:
+        # assume callable like target_generator(T=..., N=...)
+        X = target_generator(T=T, N=N)
+
+    X = X.to(device=device, dtype=dtype)
+
+    # --- generate esn ---
+    Z = esn(T=T, N=N).to(device=device, dtype=dtype)
+
+    # take last time step, first component
+    x_T = X[:, -1, 0].detach().cpu().numpy()
+    z_T = Z[:, -1, 0].detach().cpu().numpy()
+
+    # --- plot ---
+    plt.figure(figsize=(6, 4))
+    plt.hist(x_T, bins=bins, alpha=0.6, density=True, label="Target")
+    plt.hist(z_T, bins=bins, alpha=0.6, density=True, label="ESN")
+    plt.xlabel("Value at time T")
+    plt.ylabel("Density")
+    plt.title(f"Distribution at time T={T}")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
