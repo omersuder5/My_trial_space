@@ -203,6 +203,8 @@ def compare_Ws(
     print(f"||W_fit-W_fixed||_F   = {fro:.6g}")
     print(f"relative Frobenius    = {rel_fro:.6g}")
     print(f"Corr(flattened)       = {corr:.6g}")
+    print(f"W_fit[:5]             = {W_fit.flatten()[:5].numpy()}")
+    print(f"W_fixed[:5]           = {W_fixed.flatten()[:5].numpy()}")
 
     if scatter:
         plt.figure(figsize=(5, 5))
